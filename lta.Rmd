@@ -1,0 +1,444 @@
+---
+title: "LTA Passenger Flows"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+```{r}
+library(tidyverse)
+library(httr)
+
+library(sf)
+library(tmap)
+```
+
+```{r}
+#account key SGVC15PDR5ebq8vu8Axutw==
+#http://datamall2.mytransport.sg/ltaodataservice/PV/ODTrain
+```
+
+```{r}
+url <- "http://datamall2.mytransport.sg/ltaodataservice/PV/ODTrain"
+headers <- add_headers(AccountKey = "SGVC15PDR5ebq8vu8Axutw==")
+response <- GET(url, headers) %>% content()
+link <- response[["value"]][[1]][["Link"]]
+GET(link, write_disk("test.zip"), overwrite = T)
+```
+```{r}
+data <- read.csv("origin_destination_train_201810.csv")
+```
+
+```{r}
+data %>% 
+  group_by(DAY_TYPE) %>% 
+  summarise(sum(TOTAL_TRIPS/20))
+```
+```{r}
+data %>% 
+  filter(DAY_TYPE=="WEEKDAY") %>% 
+  group_by(TIME_PER_HOUR) %>% 
+  summarise(total_trips = sum(TOTAL_TRIPS)) %>% 
+  ggplot() + geom_line(aes(TIME_PER_HOUR,total_trips))
+```
+
+```{r}
+data %>% 
+  filter(str_detect(DESTINATION_PT_CODE, "DT")) %>% 
+  group_by(DESTINATION_PT_CODE) %>% 
+  summarise(TOTAL_TRIPS = sum(TOTAL_TRIPS)) %>% 
+  arrange(desc(TOTAL_TRIPS))
+```
+```{r}
+#https://www.mytransport.sg/content/dam/datamall/datasets/Geospatial/TrainStation.zip
+GET("https://www.mytransport.sg/content/dam/datamall/datasets/Geospatial/TrainStation.zip", write_disk("trainstation.zip"))
+```
+
+```{r}
+unzip("trainstation.zip")
+```
+
+```{r}
+stations <- read_sf("TrainStation_Oct2017/MRTLRTStnPtt.shp")
+```
+```{r}
+plot(stations)
+```
+
+```{r}
+stations <- stations %>% 
+  filter(OBJECTID != 17) %>% 
+  select(STN_NAME,STN_NO)
+```
+```{r}
+st_geometry(stations) <- NULL
+```
+```{r}
+data <- data %>% 
+  mutate(ORIGIN_CLEAN = map_chr(str_split(ORIGIN_PT_CODE, "-") , pluck(1))) %>% 
+  mutate(DESTINATION_CLEAN = map_chr(str_split(DESTINATION_PT_CODE, "-"), pluck(1)))
+```
+
+```{r}
+stations <- stations %>% 
+  separate_rows(STN_NO, sep = " / ")
+```
+```{r}
+
+data <- left_join(data, stations, by = c("ORIGIN_CLEAN" = "STN_NO")) %>% 
+  rename(ORIGIN_NAME = STN_NAME) %>% 
+  left_join(stations, by = c("DESTINATION_CLEAN" = "STN_NO")) %>% 
+  rename(DESTINATION_NAME = STN_NAME)
+```
+
+```{r}
+stations_sf <- read_sf("TrainStation_Oct2017/MRTLRTStnPtt.shp")
+
+```
+```{r}
+stations_sf <- stations_sf %>% 
+  filter(OBJECTID != 17)
+```
+
+```{r}
+plot(stations_sf)
+```
+```{r}
+
+tm_shape(stations_sf)  + tm_bubbles()
+```
+
+```{r}
+total_outf <- data %>% 
+  filter(DAY_TYPE=="WEEKDAY") %>% 
+  group_by(ORIGIN_NAME) %>% 
+  summarise(total_outflow = sum(TOTAL_TRIPS)) %>% 
+  arrange(desc(total_outflow))
+```
+```{r}
+total_outf <- right_join(stations_sf,total_outf, by = c("STN_NAME" = "ORIGIN_NAME")) 
+```
+```{r}
+total_outf <- total_outf %>% 
+  select(-OBJECTID) %>% 
+  mutate (ORIGIN_CLEAN = map_chr(str_split(STN_NO, " / "), pluck(1))) 
+  
+```
+
+
+
+```{r}
+tmap_mode("view")
+tm_shape(total_outf %>% select(-OBJECTID)) + tm_bubbles("total_outflow", scale = 0.5) + tm_shape(mrt_lines) + tm_lines(col = "colour")
+```
+
+temporal map(slider,small multiples, animation)
+map per station
+inflow/outflow (weekday, 7 to 10am)
+stations -> lines
+weekday vs weekend
+```{r}
+mrt_lines <- read_sf("mrt_lines.shp")
+lines_sf <- read_sf("mrt_lines.shp")
+```
+```{r}
+mrt_lines <- mrt_lines %>% 
+  st_as_sf(crs = 4326) %>% #international crs
+  st_transform(3414) %>% #singapore crs
+  mutate_if(is.factor, as.character)
+```
+
+```{r}
+tmap_mode("view")
+tm_shape(mrt_lines) +  tm_lines(col = "colour") 
+```
+
+```{r}
+morning_outflow <- data %>% 
+  filter(DAY_TYPE == "WEEKDAY", TIME_PER_HOUR >6 ) %>% 
+  filter(TIME_PER_HOUR < 10) %>% 
+  group_by(ORIGIN_NAME) %>% 
+  summarise(morning_outflow = sum(TOTAL_TRIPS))
+```
+```{r}
+morning_inflow <- data %>% 
+  filter(DAY_TYPE == "WEEKDAY", TIME_PER_HOUR >6 ) %>% 
+  filter(TIME_PER_HOUR < 10) %>% 
+  group_by(DESTINATION_NAME) %>% 
+  summarise(morning_inflow = sum(TOTAL_TRIPS))
+```
+
+```{r}
+morning_flows <- full_join(morning_inflow,morning_outflow, by = c("DESTINATION_NAME"="ORIGIN_NAME")) %>% 
+  mutate(net_flow = morning_inflow-morning_outflow) %>% 
+  mutate(abs_flow = abs(net_flow)) %>% 
+  mutate(total_flow = morning_inflow+morning_outflow) %>% 
+  arrange(desc(net_flow)) %>% 
+  rename(station = DESTINATION_NAME)
+```
+```{r}
+morning_flows <- right_join(morning_flows,stations_sf, by = c("station" = "STN_NAME")) 
+  
+```
+
+
+```{r}
+tmap_mode("view")
+st_sf(morning_flows) %>% distinct(station, .keep_all = T) %>% 
+   tm_shape() + tm_bubbles(col = "net_flow", size = "total_flow" , palette = "PuRd") + 
+    tm_shape(mrt_lines) + tm_lines(col = "colour")
+``` 
+
+Assignment here in!
+
+Explore how weekday outflow varies with time.
+```{r}
+data %>% 
+  filter(DAY_TYPE=="WEEKDAY") %>% 
+  group_by(ORIGIN_NAME,TIME_PER_HOUR) %>% 
+  summarise(outflow = sum(TOTAL_TRIPS)) %>% 
+  left_join(stations_sf,by=c("ORIGIN_NAME"="STN_NAME")) %>% 
+ st_sf() %>% 
+  tm_shape()  + tm_layout(title= "weekday outflow by hour") + tm_bubbles(size = "outflow", col = "TIME_PER_HOUR") + tm_facets( "TIME_PER_HOUR", as.layers=T)
+
+#tmap_animation(outflow_per_hour, "outflow_per_hour.gif", delay = 50)
+
+```
+
+Explore how weekday inflows varies with origin station (origin limited to along NE line only due to too many stations)
+```{r}
+data %>% 
+  filter(DAY_TYPE=="WEEKDAY") %>% 
+  filter(str_detect(ORIGIN_PT_CODE, "NE")) %>% 
+  group_by(ORIGIN_NAME,DESTINATION_NAME) %>% 
+  summarise(sum(TOTAL_TRIPS)) %>% 
+  left_join(stations_sf,by=c("DESTINATION_NAME"="STN_NAME")) %>% 
+  st_sf() %>% 
+  tm_shape() + tm_layout(title="inflows by station") +tm_bubbles(size = "sum(TOTAL_TRIPS)", col="ORIGIN_NAME") + tm_facets("ORIGIN_NAME",as.layers=T)
+```
+```{r}
+#tmap_animation(trips_by_station,"trips_by_station.mpg", delay = 50)
+```
+Explore weekly outflows by destination  (NE line only)
+```{r}
+data %>% 
+  filter(DAY_TYPE=="WEEKDAY") %>% 
+  filter(str_detect(DESTINATION_PT_CODE,"NE")) %>% 
+  group_by(DESTINATION_NAME,ORIGIN_NAME) %>% 
+  summarise(sum(TOTAL_TRIPS)) %>% 
+  left_join(stations_sf,by=c("ORIGIN_NAME"="STN_NAME")) %>% 
+  st_sf() %>% 
+  tm_shape() + tm_layout(title="outflows by destination") + tm_bubbles(size = "sum(TOTAL_TRIPS)", col = "DESTINATION_NAME") + tm_facets("DESTINATION_NAME",as.layers = T)
+```
+
+
+
+
+Explore weekly outflows by destination, but illustrated with lines (NE line only)
+
+```{r}
+tmap_mode("view")
+data %>% 
+  filter(str_detect(ORIGIN_PT_CODE, "NE")) %>% 
+  filter(DAY_TYPE=="WEEKDAY") %>% 
+  group_by(ORIGIN_NAME,DESTINATION_NAME) %>% 
+  summarise(sum(TOTAL_TRIPS)) %>% 
+  left_join(stations_sf, by = c("ORIGIN_NAME" = "STN_NAME")) %>%
+  left_join(stations_sf, by = c("DESTINATION_NAME" = "STN_NAME")) %>%
+  rowwise() %>%
+ mutate(geometry = st_combine(c(geometry.x,geometry.y))
+        %>% st_cast("LINESTRING")) %>% # note that the pipe between combine and cast is nested within mutate
+ select(-geometry.x, -geometry.y) %>%
+ st_as_sf(crs = 3414) %>% 
+  
+ tm_shape() +tm_layout(title="outflows by destination")+ tm_lines(lwd="sum(TOTAL_TRIPS)", col = "ORIGIN_NAME", scale = 10) + tm_facets("ORIGIN_NAME",as.layers = T)
+```
+Explore outflow by station, with stations coloured corresponding with the lines they are in.
+```{r}
+total_outf %>% 
+  mutate (colour = str_replace_all(ORIGIN_CLEAN,c("EW"="#009530","DT"="#0354a6","NS"="#dc241f","NE"="#9016b2","CC"="#FF9A00"))  %>% 
+           str_sub(1,7)) %>% 
+  filter(str_detect(colour,"#")) %>%
+  arrange(colour) %>% 
+  tm_shape() + tm_bubbles("total_outflow",scale = 0.5, col = "colour") + tm_shape(mrt_lines) + tm_lines(col = "colour") 
+
+```
+End of Assignment
+
+
+
+
+Footnotes to self
+```{r}
+library(tidyverse)
+library(sf)
+library(lwgeom)
+library(units)
+
+# filter only the dtl stations, represented as point geometries
+# we should have 34 stations total (DT4 is reserved for future use)
+stations_dtl <- stations_sf %>% 
+  filter(str_detect(STN_NO, "DT")) %>% 
+  st_set_crs(3414) # important, make sure we explicitely set the CRS
+glimpse(stations_dtl)
+
+# Observations: 34
+# Variables: 4
+# $ OBJECTID <dbl> 96, 97, 98, 99, 100, 102, 103, 105, 114, 115, 120, 122, 123, 132, 133, 134, 136, 13...
+# $ STN_NAME <chr> "TAMPINES EAST MRT STATION", "TAMPINES WEST MRT STATION", "GEYLANG BAHRU MRT STATIO...
+# $ STN_NO   <chr> "DT33", "DT31", "DT24", "DT23", "DT21", "DT15", "DT14", "DT26", "DT22", "DT16", "DT...
+# $ geometry <POINT [m]> POINT (41501.07 37586.62), POINT (39698.53 36406.01), POINT (32293.8 33750.95...
+
+# filter dtl line, represented as a multiline geometry
+line_dtl <- lines_sf %>% 
+  filter(ref == "DTL")
+glimpse(line_dtl)
+
+# Observations: 1
+# Variables: 20
+# $ osm_id                   <chr> "2313458"
+# $ name                     <chr> "Downtown Line (Bukit Panjang to Expo)"
+# $ role                     <chr> "(no role)"
+# $ colour                   <chr> "#0354a6"
+# $ description              <chr> NA
+# $ from                     <chr> "Bukit Panjang"
+# $ network                  <chr> "Singapore Rail"
+# $ operator                 <chr> "SBS Transit"
+# $ public_transport.version <chr> "2"
+# $ ref                      <chr> "DTL"
+# $ route                    <chr> "subway"
+# $ to                       <chr> "Expo"
+# $ type                     <chr> "route"
+# $ wikidata                 <chr> "Q1663943"
+# $ wikipedia                <chr> "en:Downtown MRT Line"
+# $ name.zh                  <chr> "滨海市区线（武吉班让至博览）"
+# $ via                      <chr> NA
+# $ wheelchair               <chr> "yes"
+# $ name.en                  <chr> "Downtown Line (Bukit Panjang to Expo)"
+# $ geometry                 <MULTILINESTRING [m]> MULTILINESTRING ((19500.08 ...
+
+# a quick plot to check if the line and stations draw in the right location
+tm_shape(line_dtl) + tm_lines() + tm_shape(stations_dtl) + tm_bubbles()
+
+# we are now ready to start splitting our multiline in individual segments
+# we want one segment for the line between each pair of stations
+# because sometimes the station points might not be located _exactly_ on the line, we snap each station to the line
+
+# a quick sanity test by outputting to the console
+# BEFORE SNAPPING
+stations_dtl %>% head()
+# AFTER SNAPPING
+# check the distance of each point with the line
+st_snap(stations_dtl, line_dtl, tolerance = 50) %>% st_distance(line_dtl, .)
+```
+
+```{r}
+## mmm, that doesn't make sense. despite the distance being within the tolerance, it hasn't snapped
+# turns out st_snap only snaps to line start/end, see https://stackoverflow.com/questions/51292952/snap-a-point-to-the-closest-point-on-a-line-segment-using-sf
+# we use st_nearest_points instead
+st_nearest_points(stations_dtl, line_dtl) # returns a line from the original point to the closest point on our downtown line
+st_nearest_points(stations_dtl, line_dtl) %>% st_line_sample(ls, sample = 1) %>% st_cast("POINT") # take the second point of each line
+
+# make things permanent now
+stations_dtl <- stations_dtl %>% 
+  mutate(geometry = st_nearest_points(geometry, line_dtl) %>% 
+           st_line_sample(ls, sample = 1) %>% 
+           st_cast("POINT"))
+
+# we still do not have the points EXACTLY on the lines...
+st_distance(line_dtl, stations_dtl)
+
+# let's create a small buffer around each point, 5 meter will do
+stations_dtl <- stations_dtl %>% st_buffer(5)
+tm_shape(stations_dtl) + tm_polygons()
+
+# we are ready to split the line in segments
+# with 34 stations we should get 33 segments (or 35 if there's track past the end stations)
+# we also get a segment _inside_ of each polygon buffer, we will remove these later but we should expect 35 + 34 segments now
+st_split(line_dtl, st_combine(stations_dtl))
+
+# this only returns 1 line still, because we now have what's called a GEOMETRYCOLLECTION, a collection of multiple lines
+# we can extract each individual line with st_collection_extract
+st_split(line_dtl, st_combine(stations_dtl)) %>% st_collection_extract(type = "LINESTRING")
+
+# 82 features? that's a little much... let's plot to inspect
+dtl_segments <- st_split(line_dtl, st_combine(stations_dtl)) %>% 
+  st_collection_extract(type = "LINESTRING") %>% 
+  mutate(id = row_number())
+
+# i like to inspect these types of things with the interactive `mapview`
+# it has highlight on hover
+mapview(list(dtl_segments, stations_dtl))
+
+# yes, looks like we have more breaks than we should
+# remember we originally had a multilinestring, there's an extra break for each original break in that multilinestring
+# we have to simplify the multilinestring to a single linestring
+line_dtl <- lines_sf %>% 
+  filter(ref == "DTL") %>% 
+  st_line_merge()
+
+# rerun the snapping process as well, since our line might have moved slightly
+stations_dtl <- stations_sf %>% 
+  filter(str_detect(STN_NO, "DT")) %>% 
+  st_set_crs(3414) %>% 
+  mutate(geometry = st_nearest_points(geometry, line_dtl) %>% 
+           st_line_sample(ls, sample = 1) %>% 
+           st_cast("POINT")) %>% 
+  st_buffer(5)
+
+
+# try again
+dtl_segments <- st_split(line_dtl, st_combine(stations_dtl)) %>% 
+  st_collection_extract(type = "LINESTRING") %>% 
+  mutate(id = row_number())
+mapview(list(dtl_segments, stations_dtl))
+
+# looks about right
+# let's remove the 'legs' inside of the polygon
+# we add the length of each line and filter lines that are less than 15 meters
+dtl_segments <- dtl_segments %>% 
+  mutate(segment_length = st_length(geometry)) %>% 
+  filter(segment_length > set_units(15, 'meters'))
+
+# note that we still have two too many segments (37 instead of 35)
+# this is because the DTL intersects itself, which makes it quite a special case
+# as this is the only line in Singapore with this characteristics, we'll solve manually
+dtl_segments <- dtl_segments %>% 
+  mutate(id = row_number()) %>% 
+  mutate(id = recode(id, `16` = 15L, `25` = 24L, .default = id)) %>% 
+  group_by(id) %>% 
+  summarise(ref = first(ref))
+mapview(list(dtl_segments, stations_dtl, stations_sf))
+
+
+
+
+# yes very nice!
+# we could even add the intersecting stations to each segment (useful for joining with other data)
+# to do so, we start again with the 'clean' stations and add a slightly larger buffer now to ensure an intersection with each segment
+
+stations_dtl <- stations_sf %>% 
+  filter(str_detect(STN_NO, "DT")) %>% 
+  st_set_crs(3414) %>% 
+  mutate(geometry = st_nearest_points(geometry, line_dtl) %>% 
+           st_line_sample(ls, sample = 1) %>% 
+           st_cast("POINT")) %>% 
+  st_buffer(15)
+
+# with intersects we can get the ids of each station that intersect with the segment, should be 1 for first/last segment, 2 for the others
+dtl_segments <- st_join(dtl_segments, stations_dtl) %>% 
+  as_tibble() %>% 
+  group_by(id) %>% 
+  summarise(ref = first(ref),
+            station1 = first(STN_NO),
+            station2 = last(STN_NO)) %>% 
+  left_join(dtl_segments) %>% 
+  st_as_sf()
+
+# plot to make sure
+stations_dtl <- stations_sf %>% # reset stations to points
+  filter(str_detect(STN_NO, "DT")) %>% 
+  st_set_crs(3414)
+steps <- tm_shape(dtl_segments) + tm_lines() + tm_facets("id", nrow=1,ncol=1, free.coords = F, drop.NA.facets = T) + tm_shape(stations_dtl) + tm_bubbles(size = 0.2)
+tmap_animation(steps, filename="dtl_segments.gif", width = 2000, delay = 25)
+```
+

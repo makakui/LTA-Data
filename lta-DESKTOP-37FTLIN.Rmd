@@ -1,0 +1,212 @@
+---
+title: "LTA Passenger Flows Data Import"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+```{r}
+library(tidyverse)
+library(httr)
+library(magick)
+library(sf)
+library(tmap)
+```
+
+```{r}
+#account key SGVC15PDR5ebq8vu8Axutw==
+#http://datamall2.mytransport.sg/ltaodataservice/PV/ODTrain
+```
+
+```{r}
+url <- "http://datamall2.mytransport.sg/ltaodataservice/PV/ODTrain"
+headers <- add_headers(AccountKey = "SGVC15PDR5ebq8vu8Axutw==")
+response <- GET(url, headers) %>% content()
+link <- response[["value"]][[1]][["Link"]]
+GET(link, write_disk("test.zip"), overwrite = T)
+```
+```{r}
+data <- read.csv("origin_destination_train_201810.csv")
+```
+
+```{r}
+data %>% 
+  group_by(DAY_TYPE) %>% 
+  summarise(sum(TOTAL_TRIPS/20))
+```
+```{r}
+data %>% 
+  filter(DAY_TYPE=="WEEKDAY") %>% 
+  group_by(TIME_PER_HOUR) %>% 
+  summarise(total_trips = sum(TOTAL_TRIPS)) %>% 
+  ggplot() + geom_line(aes(TIME_PER_HOUR,total_trips))
+```
+
+```{r}
+data %>% 
+  filter(str_detect(DESTINATION_PT_CODE, "DT")) %>% 
+  group_by(DESTINATION_PT_CODE) %>% 
+  summarise(TOTAL_TRIPS = sum(TOTAL_TRIPS)) %>% 
+  arrange(desc(TOTAL_TRIPS))
+```
+```{r}
+#https://www.mytransport.sg/content/dam/datamall/datasets/Geospatial/TrainStation.zip
+GET("https://www.mytransport.sg/content/dam/datamall/datasets/Geospatial/TrainStation.zip", write_disk("trainstation.zip"))
+```
+
+```{r}
+unzip("trainstation.zip")
+```
+
+```{r}
+stations <- read_sf("TrainStation_Oct2017/MRTLRTStnPtt.shp")
+```
+```{r}
+plot(stations)
+```
+
+```{r}
+stations <- stations %>% 
+  filter(OBJECTID != 17) %>% 
+  select(STN_NAME,STN_NO)
+```
+```{r}
+st_geometry(stations) <- NULL
+```
+```{r}
+data <- data %>% 
+  mutate(ORIGIN_CLEAN = map_chr(str_split(ORIGIN_PT_CODE, "-") , pluck(1))) %>% 
+  mutate(DESTINATION_CLEAN = map_chr(str_split(DESTINATION_PT_CODE, "-"), pluck(1)))
+```
+
+```{r}
+stations <- stations %>% 
+  separate_rows(STN_NO, sep = " / ")
+```
+```{r}
+
+data <- left_join(data, stations, by = c("ORIGIN_CLEAN" = "STN_NO")) %>% 
+  rename(ORIGIN_NAME = STN_NAME) %>% 
+  left_join(stations, by = c("DESTINATION_CLEAN" = "STN_NO")) %>% 
+  rename(DESTINATION_NAME = STN_NAME)
+```
+
+```{r}
+stations_sf <- read_sf("TrainStation_Oct2017/MRTLRTStnPtt.shp")
+
+```
+```{r}
+stations_sf <- stations_sf %>% 
+  filter(OBJECTID != 17)
+```
+
+```{r}
+plot(stations_sf)
+```
+```{r}
+
+tm_shape(stations_sf)  + tm_bubbles()
+```
+
+```{r}
+total_outf <- data %>% 
+  filter(DAY_TYPE=="WEEKDAY") %>% 
+  group_by(ORIGIN_NAME) %>% 
+  summarise(total_outflow = sum(TOTAL_TRIPS)) %>% 
+  arrange(desc(total_outflow))
+```
+```{r}
+total_outf <- right_join(stations_sf,total_outf, by = c("STN_NAME" = "ORIGIN_NAME")) 
+```
+```{r}
+tmap_mode("view")
+tm_shape(total_outf %>% select(-OBJECTID)) + tm_bubbles("total_outflow") + tm_shape(lines_sf) + tm_lines(col = "OBJECTID")
+```
+
+temporal map(slider,small multiples, animation)
+map per station
+inflow/outflow (weekday, 7 to 10am)
+stations -> lines
+weekday vs weekend
+
+```{r}
+morning_outflow <- data %>% 
+  filter(DAY_TYPE == "WEEKDAY", TIME_PER_HOUR >6 ) %>% 
+  filter(TIME_PER_HOUR < 10) %>% 
+  group_by(ORIGIN_NAME) %>% 
+  summarise(morning_outflow = sum(TOTAL_TRIPS))
+```
+```{r}
+morning_inflow <- data %>% 
+  filter(DAY_TYPE == "WEEKDAY", TIME_PER_HOUR >6 ) %>% 
+  filter(TIME_PER_HOUR < 10) %>% 
+  group_by(DESTINATION_NAME) %>% 
+  summarise(morning_inflow = sum(TOTAL_TRIPS))
+```
+
+```{r}
+morning_flows <- full_join(morning_inflow,morning_outflow, by = c("DESTINATION_NAME"="ORIGIN_NAME")) %>% 
+  mutate(net_flow = morning_inflow-morning_outflow) %>% 
+  mutate(abs_flow = abs(net_flow)) %>% 
+  mutate(total_flow = morning_inflow+morning_outflow) %>% 
+  arrange(desc(net_flow)) %>% 
+  rename(station = DESTINATION_NAME)
+```
+```{r}
+morning_flows <- right_join(morning_flows,stations_sf, by = c("station" = "STN_NAME")) 
+  
+```
+```{r}
+transport_sf %>% 
+  filter(
+```
+
+
+```{r}
+tmap_mode("view")
+#st_sf(morning_flows) %>% 
+  #tm_shape() + tm_bubbles(col = "net_flow", size = "total_flow" , palette = "PuRd") + 
+    tm_shape(transport_sf) + tm_lines(col = "name")
+``` 
+```{r}
+lines_sf <- read_sf("G_MP14_RAIL_LI.shp")
+```
+```{r}
+transport_sf <- read_sf("gis_osm_railways_free_1.shp")
+```
+```{r}
+plot(transport_sf)
+```
+```{r}
+outflow_per_hour <- data %>% 
+  filter(DAY_TYPE=="WEEKDAY") %>% 
+  group_by(ORIGIN_NAME,TIME_PER_HOUR) %>% 
+  summarise(outflow = sum(TOTAL_TRIPS)) %>% 
+  left_join(stations_sf,by=c("ORIGIN_NAME"="STN_NAME")) %>% 
+ st_sf() %>% 
+  tm_shape() + tm_bubbles(size = "outflow") + tm_facets( "TIME_PER_HOUR", nrow = 1, ncol=1)
+
+tmap_animation(outflow_per_hour, "outflow_per_hour.gif", delay = 50)
+
+```
+```{r}
+trips_by_station <- data %>% 
+  filter(DAY_TYPE=="WEEKDAY") %>% 
+  group_by(ORIGIN_NAME,DESTINATION_NAME) %>% 
+  summarise(sum(TOTAL_TRIPS)) %>% 
+  left_join(stations_sf,by=c("DESTINATION_NAME"="STN_NAME")) %>% 
+  st_sf() %>% 
+  tm_shape() + tm_bubbles(size = "sum(TOTAL_TRIPS)") + tm_facets("ORIGIN_NAME",nrow=1,ncol=1)
+```
+```{r}
+tmap_animation(trips_by_station,"trips_by_station.mpg", delay = 50)
+```
+
+```{r}
+mrt_sf <-read_sf("G_MP14_RAIL_STN_PL.shp")
+```
+```{r}
+plot(lines_sf)
+```
+
+
+
